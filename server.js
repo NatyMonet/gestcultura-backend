@@ -1,6 +1,14 @@
 // ============================================================================
 // SERVIDOR EXPRESS.JS - GESTCULTURA
 // Ficha SENA: 3013183 | Estudiante: Natalia Mejía Cardona
+// ----------------------------------------------------------------------------
+// SEGURIDAD APLICADA:
+//  - Anti inyección SQL: TODAS las consultas usan parámetros (?), nunca se
+//    concatena directamente lo que escribe el usuario.
+//  - Contraseñas de usuarios: guardadas cifradas con bcrypt (hash + salt).
+//  - Credenciales (BD y API): en el archivo .env, fuera del código y del repositorio.
+//  - CORS restringido: solo el frontend de GestCultura puede consumir la API.
+//  - PENDIENTE (próximo paso): rutas protegidas por rol (login/admin con token JWT).
 // ============================================================================
 
 const express = require('express');
@@ -15,18 +23,25 @@ const PORT = 5000;
 // ============================================================================
 // MIDDLEWARE
 // ============================================================================
-app.use(cors());
+// Seguridad CORS: solo se permiten peticiones desde el frontend de GestCultura
+// (así ninguna otra página web puede consumir esta API desde el navegador).
+const corsOptions = {
+  origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+};
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ============================================================================
 // CONFIGURACIÓN DE BASE DE DATOS
 // ============================================================================
+// Seguridad: las credenciales NO van escritas en el código; se leen del
+// archivo .env (que está en .gitignore y no se sube a GitHub).
 const connection = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || 'Monetmejia1#',
-  database: process.env.DB_NAME || 'gestion_empatica',
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
