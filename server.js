@@ -28,10 +28,17 @@ const PORT = 5000;
 // ============================================================================
 // MIDDLEWARE
 // ============================================================================
-// Seguridad CORS: solo se permiten peticiones desde el frontend de GestCultura
-// (así ninguna otra página web puede consumir esta API desde el navegador).
+// Seguridad CORS: solo se permiten peticiones desde el frontend en tu equipo
+// (localhost/127.0.0.1, en cualquier puerto de desarrollo de Vite: 5173, 5174, etc.).
+// Ninguna otra página web de internet puede consumir esta API desde el navegador.
 const corsOptions = {
-  origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+  origin: (origin, callback) => {
+    if (!origin || /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Origen no permitido por CORS'));
+    }
+  },
 };
 app.use(cors(corsOptions));
 app.use(express.json());
