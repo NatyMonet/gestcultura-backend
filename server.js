@@ -8,14 +8,19 @@
 //  - Contraseñas de usuarios: guardadas cifradas con bcrypt (hash + salt).
 //  - Credenciales (BD y API): en el archivo .env, fuera del código y del repositorio.
 //  - CORS restringido: solo el frontend de GestCultura puede consumir la API.
-//  - PENDIENTE (próximo paso): rutas protegidas por rol (login/admin con token JWT).
+//  - Rutas de administrador protegidas por token JWT + rol: solo un admin puede
+//    crear, editar o eliminar convocatorias (verificarToken + soloAdmin).
 // ============================================================================
 
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
+
+// Llave secreta para firmar los tokens (viene del .env, fuera del código)
+const JWT_SECRET = process.env.JWT_SECRET || 'gestcultura_dev_secret_2026';
 
 const app = express();
 const PORT = 5000;
@@ -63,6 +68,34 @@ async function initServer() {
   app.listen(PORT, () => {
     console.log(`🚀 Servidor running en http://localhost:${PORT}`);
   });
+}
+
+// ============================================================================
+// SEGURIDAD - MIDDLEWARES DE TOKEN Y ROL
+// ============================================================================
+
+// Verifica que la petición traiga un token válido (persona con sesión iniciada)
+function verificarToken(req, res, next) {
+  const cabecera = req.headers['authorization'] || '';
+  const token = cabecera.startsWith('Bearer ') ? cabecera.slice(7) : null;
+  if (!token) {
+    return res.status(401).json({ success: false, message: 'Necesitas iniciar sesión para hacer esta acción' });
+  }
+  try {
+    const datos = jwt.verify(token, JWT_SECRET);
+    req.usuario = datos; // { idUsuario, idRol }
+    next();
+  } catch (e) {
+    return res.status(401).json({ success: false, message: 'Tu sesión expiró o no es válida. Inicia sesión de nuevo.' });
+  }
+}
+
+// Verifica que la persona sea administrador (idRol = 1). Úsalo después de verificarToken.
+function soloAdmin(req, res, next) {
+  if (!req.usuario || Number(req.usuario.idRol) !== 1) {
+    return res.status(403).json({ success: false, message: 'Solo un administrador puede realizar esta acción' });
+  }
+  next();
 }
 
 // ============================================================================
@@ -156,9 +189,17 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
+    // Generamos el token con la identidad y el rol de la persona (dura 8 horas)
+    const token = jwt.sign(
+      { idUsuario: usuario.idUsuario, idRol: usuario.idRol },
+      JWT_SECRET,
+      { expiresIn: '8h' }
+    );
+
     res.json({
       success: true,
       message: 'Sesión iniciada correctamente',
+      token,
       user: {
         idUsuario: usuario.idUsuario,
         nombre: usuario.nombre,
@@ -265,8 +306,8 @@ app.get('/api/convocatorias/:id', async (req, res) => {
   }
 });
 
-// POST crear nueva convocatoria
-app.post('/api/convocatorias', async (req, res) => {
+// POST crear nueva convocatoria (solo administradores)
+app.post('/api/convocatorias', verificarToken, soloAdmin, async (req, res) => {
   try {
     const { nombre, descripcion, fechaInicio, fechaCierre, cupos, idUsuario } = req.body;
 
@@ -298,8 +339,8 @@ app.post('/api/convocatorias', async (req, res) => {
   }
 });
 
-// PUT actualizar convocatoria
-app.put('/api/convocatorias/:id', async (req, res) => {
+// PUT actualizar convocatoria (solo administradores)
+app.put('/api/convocatorias/:id', verificarToken, soloAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { nombre, descripcion, fechaInicio, fechaCierre, cupos, estado } = req.body;
@@ -331,8 +372,8 @@ app.put('/api/convocatorias/:id', async (req, res) => {
   }
 });
 
-// DELETE eliminar convocatoria
-app.delete('/api/convocatorias/:id', async (req, res) => {
+// DELETE eliminar convocatoria (solo administradores)
+app.delete('/api/convocatorias/:id', verificarToken, soloAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
