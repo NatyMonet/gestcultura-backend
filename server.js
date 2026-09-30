@@ -17,10 +17,14 @@ const cors = require('cors');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 // Llave secreta para firmar los tokens (viene del .env, fuera del código)
 const JWT_SECRET = process.env.JWT_SECRET || 'gestcultura_dev_secret_2026';
+
+// Dirección del frontend (para armar el enlace de recuperación de contraseña)
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
 const app = express();
 const PORT = 5000;
@@ -252,6 +256,152 @@ app.get('/api/usuarios/:id', async (req, res) => {
       success: false,
       message: 'Error al obtener usuario',
     });
+  }
+});
+
+// ============================================================================
+// RECUPERACIÓN DE CONTRASEÑA (por correo)
+// ----------------------------------------------------------------------------
+// Flujo seguro:
+//  1) La persona pide recuperar su contraseña con su correo.
+//  2) El sistema genera un token temporal (JWT, válido 30 minutos) y envía
+//     un enlace al correo registrado.
+//  3) La persona abre el enlace y define una contraseña nueva, que se guarda
+//     cifrada con bcrypt. El token expira solo a los 30 minutos.
+// ============================================================================
+
+// Prepara el "cartero" que envía los correos. Si todavía no hay correo
+// configurado en el .env (EMAIL_USER / EMAIL_PASS), devuelve null y el sistema
+// funciona en "modo desarrollo" mostrando el enlace en la consola.
+function crearTransporter() {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) return null;
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
+  });
+}
+
+// PASO 1 - Solicitar recuperación: POST /api/auth/recuperar
+app.post('/api/auth/recuperar', async (req, res) => {
+  try {
+    const { correo } = req.body;
+    if (!correo) {
+      return res.status(400).json({ success: false, message: 'El correo es requerido' });
+    }
+
+    const conn = await connection.getConnection();
+    const [usuarios] = await conn.query(
+      'SELECT idUsuario, nombre FROM usuario WHERE correo = ?',
+      [correo]
+    );
+    conn.release();
+
+    // Mensaje genérico: por seguridad no revelamos si el correo existe o no.
+    const mensajeGenerico =
+      'Si el correo está registrado, te enviaremos un enlace para restablecer tu contraseña. Revisa tu bandeja de entrada (y el correo no deseado).';
+
+    // Si no existe, respondemos igual (sin dar pistas a posibles atacantes).
+    if (usuarios.length === 0) {
+      return res.json({ success: true, message: mensajeGenerico });
+    }
+
+    const usuario = usuarios[0];
+
+    // Token temporal de recuperación (válido 30 minutos)
+    const token = jwt.sign(
+      { idUsuario: usuario.idUsuario, tipo: 'reset' },
+      JWT_SECRET,
+      { expiresIn: '30m' }
+    );
+    const enlace = `${FRONTEND_URL}/restablecer?token=${token}`;
+
+    const transporter = crearTransporter();
+
+    // MODO DESARROLLO: si aún no hay correo configurado, mostramos el enlace
+    // en la consola del servidor para poder probar el flujo completo.
+    if (!transporter) {
+      console.log('🔑 [RECUPERACIÓN - modo desarrollo] Enlace para', correo, '->', enlace);
+      return res.json({ success: true, message: mensajeGenerico, enlaceDev: enlace });
+    }
+
+    // MODO REAL: enviamos el correo con el enlace.
+    await transporter.sendMail({
+      from: `"GestCultura" <${process.env.EMAIL_USER}>`,
+      to: correo,
+      subject: 'Recupera tu contraseña - GestCultura',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; border:1px solid #eee; border-radius:14px; overflow:hidden">
+          <div style="background: linear-gradient(135deg, #7C3AED, #4A148C); color:#fff; padding:24px; text-align:center">
+            <h2 style="margin:0">Gestión Empática</h2>
+            <p style="margin:6px 0 0; opacity:.9">Recuperación de contraseña</p>
+          </div>
+          <div style="padding:24px; color:#333; line-height:1.6">
+            <p>Hola ${usuario.nombre || ''},</p>
+            <p>Recibimos una solicitud para restablecer tu contraseña. Haz clic en el botón para crear una nueva:</p>
+            <p style="text-align:center; margin:26px 0">
+              <a href="${enlace}" style="background:#7C3AED; color:#fff; text-decoration:none; padding:13px 26px; border-radius:10px; font-weight:bold; display:inline-block">Restablecer mi contraseña</a>
+            </p>
+            <p style="font-size:13px; color:#777">Este enlace es válido por 30 minutos. Si tú no solicitaste este cambio, puedes ignorar este correo; tu contraseña seguirá igual.</p>
+          </div>
+        </div>
+      `,
+    });
+
+    return res.json({ success: true, message: mensajeGenerico });
+  } catch (error) {
+    console.error('Error en recuperar contraseña:', error);
+    res.status(500).json({ success: false, message: 'Error al procesar la solicitud' });
+  }
+});
+
+// PASO 2 - Definir la nueva contraseña: POST /api/auth/restablecer
+app.post('/api/auth/restablecer', async (req, res) => {
+  try {
+    const { token, contrasena, confirmContrasena } = req.body;
+
+    if (!token || !contrasena || !confirmContrasena) {
+      return res.status(400).json({ success: false, message: 'Todos los campos son requeridos' });
+    }
+    if (contrasena !== confirmContrasena) {
+      return res.status(400).json({ success: false, message: 'Las contraseñas no coinciden' });
+    }
+    if (contrasena.length < 8) {
+      return res.status(400).json({ success: false, message: 'La contraseña debe tener al menos 8 caracteres' });
+    }
+
+    // Verificamos el token (si expiró o es inválido, no se permite el cambio)
+    let datos;
+    try {
+      datos = jwt.verify(token, JWT_SECRET);
+    } catch (e) {
+      return res.status(400).json({ success: false, message: 'El enlace expiró o no es válido. Por favor solicita uno nuevo.' });
+    }
+    if (datos.tipo !== 'reset') {
+      return res.status(400).json({ success: false, message: 'El enlace no es válido.' });
+    }
+
+    // Guardamos la nueva contraseña cifrada con bcrypt
+    const salt = await bcrypt.genSalt(10);
+    const contrasenaCifrada = await bcrypt.hash(contrasena, salt);
+
+    const conn = await connection.getConnection();
+    const [result] = await conn.query(
+      'UPDATE usuario SET contrasena = ? WHERE idUsuario = ?',
+      [contrasenaCifrada, datos.idUsuario]
+    );
+    conn.release();
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    }
+
+    res.json({ success: true, message: 'Tu contraseña fue actualizada correctamente. Ya puedes iniciar sesión.' });
+  } catch (error) {
+    console.error('Error al restablecer contraseña:', error);
+    res.status(500).json({ success: false, message: 'Error al restablecer la contraseña' });
   }
 });
 
