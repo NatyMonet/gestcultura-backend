@@ -431,6 +431,32 @@ app.get('/api/convocatorias', async (req, res) => {
   }
 });
 
+// GET TODAS las convocatorias (incluidas las inactivas) - solo administradores
+// Se usa en el Panel de Administración para poder ver y reactivar las que
+// fueron inactivadas (borrado lógico). El público nunca ve las inactivas.
+// IMPORTANTE: esta ruta va ANTES de '/api/convocatorias/:id' para que ':id'
+// no confunda la palabra 'admin' con un número de convocatoria.
+app.get('/api/convocatorias/admin', verificarToken, soloAdmin, async (req, res) => {
+  try {
+    const conn = await connection.getConnection();
+    const [convocatorias] = await conn.query(
+      'SELECT * FROM convocatoria ORDER BY fechaInicio DESC'
+    );
+    conn.release();
+
+    res.json({
+      success: true,
+      data: convocatorias,
+    });
+  } catch (error) {
+    console.error('Error al obtener convocatorias (admin):', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener convocatorias',
+    });
+  }
+});
+
 // GET una convocatoria por ID
 app.get('/api/convocatorias/:id', async (req, res) => {
   try {
@@ -529,14 +555,17 @@ app.put('/api/convocatorias/:id', verificarToken, soloAdmin, async (req, res) =>
   }
 });
 
-// DELETE eliminar convocatoria (solo administradores)
+// DELETE inactivar convocatoria (BORRADO LÓGICO - solo administradores)
+// No borra el registro de la base de datos: solo lo marca como inactivo
+// (estado = 0). Así la información queda guardada y se puede reactivar luego.
+// Las convocatorias inactivas no se muestran al público.
 app.delete('/api/convocatorias/:id', verificarToken, soloAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
     const conn = await connection.getConnection();
     const [result] = await conn.query(
-      'DELETE FROM convocatoria WHERE idConvocatoria = ?',
+      'UPDATE convocatoria SET estado = 0 WHERE idConvocatoria = ?',
       [id]
     );
     conn.release();
@@ -550,13 +579,46 @@ app.delete('/api/convocatorias/:id', verificarToken, soloAdmin, async (req, res)
 
     res.json({
       success: true,
-      message: 'Convocatoria eliminada correctamente',
+      message: 'Convocatoria inactivada correctamente',
     });
   } catch (error) {
-    console.error('Error al eliminar convocatoria:', error);
+    console.error('Error al inactivar convocatoria:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al eliminar convocatoria',
+      message: 'Error al inactivar convocatoria',
+    });
+  }
+});
+
+// PUT reactivar convocatoria (BORRADO LÓGICO - solo administradores)
+// Vuelve a poner estado = 1 (activa) una convocatoria que estaba inactiva.
+app.put('/api/convocatorias/:id/reactivar', verificarToken, soloAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const conn = await connection.getConnection();
+    const [result] = await conn.query(
+      'UPDATE convocatoria SET estado = 1 WHERE idConvocatoria = ?',
+      [id]
+    );
+    conn.release();
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Convocatoria no encontrada',
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Convocatoria reactivada correctamente',
+    });
+  } catch (error) {
+    console.error('Error al reactivar convocatoria:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al reactivar convocatoria',
     });
   }
 });
