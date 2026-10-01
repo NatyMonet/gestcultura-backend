@@ -379,10 +379,17 @@ app.put('/api/usuarios/:id/estado', verificarToken, soloAdmin, async (req, res) 
 function crearTransporter() {
   if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) return null;
   return nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 587,          // Puerto 587 con STARTTLS: más compatible con redes y antivirus
+    secure: false,      // false en 587 (la conexión se cifra con STARTTLS)
     auth: {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_PASS,
+    },
+    tls: {
+      // Tolera certificados de antivirus/proxys locales en desarrollo
+      // (algunos antivirus "inspeccionan" el tráfico seguro con su propio certificado).
+      rejectUnauthorized: false,
     },
   });
 }
