@@ -178,7 +178,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     const conn = await connection.getConnection();
     const [usuarios] = await conn.query(
-      'SELECT idUsuario, nombre, correo, contrasena, idRol FROM usuario WHERE correo = ?',
+      'SELECT idUsuario, nombre, correo, contrasena, idRol, estado FROM usuario WHERE correo = ?',
       [correo]
     );
     conn.release();
@@ -197,6 +197,14 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({
         success: false,
         message: 'Usuario o contraseña incorrectos',
+      });
+    }
+
+    // Si la cuenta fue inactivada por un administrador, no permitimos el acceso.
+    if (Number(usuario.estado) === 0) {
+      return res.status(403).json({
+        success: false,
+        message: 'Tu cuenta está inactiva. Comunícate con el administrador.',
       });
     }
 
@@ -256,6 +264,101 @@ app.get('/api/usuarios/:id', async (req, res) => {
       success: false,
       message: 'Error al obtener usuario',
     });
+  }
+});
+
+// ============================================================================
+// GESTIÓN DE USUARIOS Y ROLES (solo administradores)
+// ----------------------------------------------------------------------------
+// Permite al administrador ver todos los usuarios, cambiarles el rol
+// (Administrador / Participante) y activarlos o inactivarlos (borrado lógico).
+// Nunca se devuelve la contraseña.
+// ============================================================================
+
+// GET todos los usuarios (con el nombre de su rol). Solo administradores.
+app.get('/api/usuarios', verificarToken, soloAdmin, async (req, res) => {
+  try {
+    const conn = await connection.getConnection();
+    const [usuarios] = await conn.query(
+      `SELECT u.idUsuario, u.nombre, u.correo, u.telefono, u.cedula, u.estado, u.idRol, r.nombre AS rol
+       FROM usuario u
+       JOIN rol r ON u.idRol = r.idRol
+       ORDER BY u.idUsuario ASC`
+    );
+    conn.release();
+
+    res.json({ success: true, data: usuarios });
+  } catch (error) {
+    console.error('Error al obtener usuarios:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener usuarios' });
+  }
+});
+
+// PUT cambiar el rol de un usuario (1 = Administrador, 2 = Participante). Solo admin.
+app.put('/api/usuarios/:id/rol', verificarToken, soloAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { idRol } = req.body;
+
+    if (![1, 2].includes(Number(idRol))) {
+      return res.status(400).json({ success: false, message: 'Rol inválido' });
+    }
+    // Por seguridad, un administrador no puede cambiarse el rol a sí mismo
+    // (así evita quedarse sin administradores por error).
+    if (Number(req.usuario.idUsuario) === Number(id)) {
+      return res.status(400).json({ success: false, message: 'No puedes cambiar tu propio rol' });
+    }
+
+    const conn = await connection.getConnection();
+    const [result] = await conn.query(
+      'UPDATE usuario SET idRol = ? WHERE idUsuario = ?',
+      [Number(idRol), id]
+    );
+    conn.release();
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    }
+
+    res.json({ success: true, message: 'Rol actualizado correctamente' });
+  } catch (error) {
+    console.error('Error al cambiar el rol:', error);
+    res.status(500).json({ success: false, message: 'Error al cambiar el rol' });
+  }
+});
+
+// PUT activar (estado=1) o inactivar (estado=0) un usuario - borrado lógico. Solo admin.
+app.put('/api/usuarios/:id/estado', verificarToken, soloAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { estado } = req.body;
+
+    if (![0, 1].includes(Number(estado))) {
+      return res.status(400).json({ success: false, message: 'Estado inválido' });
+    }
+    // Un administrador no puede inactivar su propia cuenta.
+    if (Number(req.usuario.idUsuario) === Number(id) && Number(estado) === 0) {
+      return res.status(400).json({ success: false, message: 'No puedes inactivar tu propia cuenta' });
+    }
+
+    const conn = await connection.getConnection();
+    const [result] = await conn.query(
+      'UPDATE usuario SET estado = ? WHERE idUsuario = ?',
+      [Number(estado), id]
+    );
+    conn.release();
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    }
+
+    res.json({
+      success: true,
+      message: Number(estado) === 1 ? 'Usuario activado correctamente' : 'Usuario inactivado correctamente',
+    });
+  } catch (error) {
+    console.error('Error al cambiar el estado del usuario:', error);
+    res.status(500).json({ success: false, message: 'Error al cambiar el estado del usuario' });
   }
 });
 
