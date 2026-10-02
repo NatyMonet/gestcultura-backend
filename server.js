@@ -18,6 +18,7 @@ const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
+const crypto = require('crypto');
 require('dotenv').config();
 
 // Llave secreta para firmar los tokens (viene del .env, fuera del código)
@@ -25,6 +26,14 @@ const JWT_SECRET = process.env.JWT_SECRET || 'gestcultura_dev_secret_2026';
 
 // Dirección del frontend (para armar el enlace de recuperación de contraseña)
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+// Valor de la inscripción (en COP). Lo decide SIEMPRE el servidor, nunca el
+// navegador: el precio jamás viaja desde el cliente (principio de seguridad
+// que recalca el material del instructor sobre pasarelas de pago).
+const VALOR_INSCRIPCION = 50000;
+
+// API de Wompi en modo pruebas (sandbox). Las llaves viven en el .env.
+const WOMPI_API = process.env.WOMPI_API || 'https://sandbox.wompi.co/v1';
 
 const app = express();
 const PORT = 5000;
@@ -744,9 +753,10 @@ app.get('/api/inscripciones/usuario/:idUsuario', async (req, res) => {
 
     const conn = await connection.getConnection();
     const [inscripciones] = await conn.query(
-      `SELECT i.*, c.nombre as nombreConvocatoria, c.fechaCierre 
-       FROM inscripcion i 
-       JOIN convocatoria c ON i.idConvocatoria = c.idConvocatoria 
+      `SELECT i.*, c.nombre as nombreConvocatoria, c.fechaCierre,
+              (SELECT COUNT(*) FROM comprobante cp WHERE cp.idInscripcion = i.idInscripcion) AS tienePago
+       FROM inscripcion i
+       JOIN convocatoria c ON i.idConvocatoria = c.idConvocatoria
        WHERE i.idUsuario = ?`,
       [idUsuario]
     );
@@ -896,6 +906,253 @@ app.post('/api/postulaciones', async (req, res) => {
     conn.release();
     console.error('Error al registrar la postulación:', error);
     res.status(500).json({ success: false, message: 'Error al registrar la postulación' });
+  }
+});
+
+// ============================================================================
+// RUTAS - PAGOS (Pasarelas de pago - Módulo 5)
+// ----------------------------------------------------------------------------
+//  - WOMPI: integración REAL en modo pruebas (sandbox). El servidor calcula el
+//    monto y la FIRMA DE INTEGRIDAD (SHA-256), y el resultado se confirma
+//    consultando la transacción DIRECTAMENTE a Wompi (servidor a servidor),
+//    nunca creyéndole a la URL que ve el navegador.
+//  - PayU y PayPal: simulación para el PMV (la interfaz queda lista para
+//    integrarlas igual que Wompi más adelante).
+//
+// PRINCIPIO DE SEGURIDAD: el valor a pagar lo decide SIEMPRE el servidor
+// (VALOR_INSCRIPCION). Nunca se confía en el monto que envía el navegador.
+// ============================================================================
+
+// Firma de integridad que exige Wompi:
+// SHA-256 de  referencia + monto_en_centavos + moneda + secreto_de_integridad
+function firmaIntegridadWompi(referencia, centavos, moneda = 'COP') {
+  const cadena = `${referencia}${centavos}${moneda}${process.env.WOMPI_INTEGRITY_SECRET}`;
+  return crypto.createHash('sha256').update(cadena).digest('hex');
+}
+
+// --- PayU / PayPal: pago simulado para el PMV -------------------------------
+app.post('/api/pagos', async (req, res) => {
+  const { idInscripcion, pasarela } = req.body;
+
+  if (!idInscripcion) {
+    return res.status(400).json({ success: false, message: 'idInscripcion es requerido' });
+  }
+
+  // El monto lo decide el SERVIDOR; se ignora cualquier valor enviado por el navegador.
+  const monto = VALOR_INSCRIPCION;
+
+  const conn = await connection.getConnection();
+  try {
+    // ¿Ya existe un pago registrado para esta inscripción?
+    const [existentes] = await conn.query(
+      'SELECT idComprobante FROM comprobante WHERE idInscripcion = ?',
+      [idInscripcion]
+    );
+    if (existentes.length > 0) {
+      conn.release();
+      return res.status(400).json({ success: false, message: 'Esta inscripción ya tiene un pago registrado' });
+    }
+
+    const canal = `Web - ${String(pasarela || 'Pasarela').slice(0, 22)}`;
+    await conn.query(
+      "INSERT INTO comprobante (archivo, monto, fechaCarga, estado, canalEnvio, idInscripcion) VALUES (?, ?, CURDATE(), 'Validado', ?, ?)",
+      [`pago_simulado_${(pasarela || 'web').toLowerCase()}.txt`, monto, canal, idInscripcion]
+    );
+    conn.release();
+
+    res.status(201).json({ success: true, message: 'Pago registrado correctamente (simulación)', monto });
+  } catch (error) {
+    conn.release();
+    console.error('Error al registrar el pago:', error);
+    res.status(500).json({ success: false, message: 'Error al registrar el pago' });
+  }
+});
+
+// --- WOMPI · 1) Iniciar el pago (modo pruebas / sandbox) --------------------
+// El servidor fija el monto, genera la referencia y calcula la firma de
+// integridad, y entrega al navegador solo los datos públicos para abrir el
+// checkout de Wompi. La llave privada y el secreto de integridad NUNCA salen
+// del servidor.
+app.post('/api/pagos/wompi/iniciar', async (req, res) => {
+  const { idInscripcion } = req.body;
+
+  if (!idInscripcion) {
+    return res.status(400).json({ success: false, message: 'idInscripcion es requerido' });
+  }
+  if (!process.env.WOMPI_PUBLIC_KEY || !process.env.WOMPI_INTEGRITY_SECRET) {
+    // Si todavía no se han configurado las llaves de prueba de Wompi, no mostramos
+    // un error técnico: avisamos amablemente que está en configuración y que se
+    // puede usar otra pasarela mientras tanto.
+    return res.status(200).json({
+      success: false,
+      configPendiente: true,
+      message: 'El pago con Wompi (modo pruebas / sandbox) está en configuración. Por ahora puedes usar PayU o PayPal.',
+    });
+  }
+
+  const conn = await connection.getConnection();
+  try {
+    // La inscripción debe existir.
+    const [ins] = await conn.query('SELECT idInscripcion FROM inscripcion WHERE idInscripcion = ?', [idInscripcion]);
+    if (ins.length === 0) {
+      conn.release();
+      return res.status(404).json({ success: false, message: 'Inscripción no encontrada' });
+    }
+    // ¿Ya tiene un pago registrado?
+    const [existentes] = await conn.query('SELECT idComprobante FROM comprobante WHERE idInscripcion = ?', [idInscripcion]);
+    if (existentes.length > 0) {
+      conn.release();
+      return res.status(400).json({ success: false, message: 'Esta inscripción ya tiene un pago registrado' });
+    }
+    conn.release();
+
+    // El monto lo fija el SERVIDOR (en centavos, como lo pide Wompi).
+    const centavos = VALOR_INSCRIPCION * 100;
+    // Referencia única que lleva el id de la inscripción para reconocerla al volver.
+    const referencia = `CINE-${idInscripcion}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    const firma = firmaIntegridadWompi(referencia, centavos, 'COP');
+    const redirectUrl = `${FRONTEND_URL}/pago-resultado`;
+
+    res.json({
+      success: true,
+      publicKey: process.env.WOMPI_PUBLIC_KEY,
+      referencia,
+      amountInCents: centavos,
+      moneda: 'COP',
+      firma,
+      redirectUrl,
+      montoCop: VALOR_INSCRIPCION,
+    });
+  } catch (error) {
+    try { conn.release(); } catch (e) { /* noop */ }
+    console.error('Error al iniciar el pago con Wompi:', error);
+    res.status(500).json({ success: false, message: 'Error al iniciar el pago con Wompi' });
+  }
+});
+
+// --- WOMPI · 2) Confirmar el resultado (servidor a servidor) ----------------
+// Cuando Wompi devuelve al cliente con ?id=TRANSACCION, el servidor le pregunta
+// DIRECTAMENTE a Wompi el estado real (no se confía en la URL del navegador).
+// Si quedó APROBADA y el monto coincide con lo que fijó el servidor, registra
+// el comprobante (una sola vez).
+app.get('/api/pagos/wompi/resultado', async (req, res) => {
+  const { id } = req.query;
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'Falta el id de la transacción' });
+  }
+
+  try {
+    const resp = await fetch(`${WOMPI_API}/transactions/${encodeURIComponent(id)}`);
+    const json = await resp.json();
+    const tx = json && json.data ? json.data : null;
+    if (!tx) {
+      return res.status(404).json({ success: false, message: 'No se encontró la transacción en Wompi' });
+    }
+
+    const estadoWompi = tx.status; // APPROVED | DECLINED | VOIDED | ERROR | PENDING
+    const referencia = tx.reference || '';
+    const centavos = Number(tx.amount_in_cents) || 0;
+
+    // La referencia tiene la forma CINE-<idInscripcion>-XXXX
+    const partes = referencia.split('-');
+    const idInscripcion = partes.length >= 2 ? Number(partes[1]) : null;
+
+    const mapa = { APPROVED: 'APROBADA', DECLINED: 'RECHAZADA', VOIDED: 'RECHAZADA', ERROR: 'ERROR', PENDING: 'PENDIENTE' };
+    let estado = mapa[estadoWompi] || 'ERROR';
+
+    // Validación de monto: debe coincidir con lo que fijó el servidor.
+    const esperado = VALOR_INSCRIPCION * 100;
+    if (estado === 'APROBADA' && centavos !== esperado) {
+      estado = 'ERROR';
+    }
+
+    // Si quedó aprobada y hay inscripción, registramos el comprobante (solo una vez).
+    if (estado === 'APROBADA' && idInscripcion) {
+      const conn = await connection.getConnection();
+      try {
+        const [existentes] = await conn.query('SELECT idComprobante FROM comprobante WHERE idInscripcion = ?', [idInscripcion]);
+        if (existentes.length === 0) {
+          await conn.query(
+            "INSERT INTO comprobante (archivo, monto, fechaCarga, estado, canalEnvio, idInscripcion) VALUES (?, ?, CURDATE(), 'Validado', 'Web - Wompi', ?)",
+            [`wompi_${tx.id}.txt`, centavos / 100, idInscripcion]
+          );
+        }
+      } finally {
+        conn.release();
+      }
+    }
+
+    res.json({
+      success: true,
+      estado,
+      estadoWompi,
+      referencia,
+      idInscripcion,
+      monto: centavos / 100,
+      transaccionId: tx.id,
+    });
+  } catch (error) {
+    console.error('Error al consultar la transacción de Wompi:', error);
+    res.status(500).json({ success: false, message: 'Error al confirmar el pago con Wompi' });
+  }
+});
+
+// --- Comprobante de PAGO (recibo estilo pasarela) ---------------------------
+// Devuelve los datos del pago de una inscripción para mostrar/descargar el
+// recibo (distinto al comprobante de radicación de la postulación). El ID de
+// transacción y la referencia se derivan de forma estable del comprobante, para
+// que siempre salgan iguales al reabrir el recibo.
+app.get('/api/pagos/comprobante/:idInscripcion', async (req, res) => {
+  const { idInscripcion } = req.params;
+  const conn = await connection.getConnection();
+  try {
+    const [rows] = await conn.query(
+      `SELECT cp.idComprobante, cp.monto, cp.fechaCarga, cp.estado, cp.canalEnvio,
+              u.nombre AS postulante, u.correo,
+              c.nombre AS convocatoria
+       FROM comprobante cp
+       JOIN inscripcion i ON cp.idInscripcion = i.idInscripcion
+       JOIN usuario u ON i.idUsuario = u.idUsuario
+       JOIN convocatoria c ON i.idConvocatoria = c.idConvocatoria
+       WHERE cp.idInscripcion = ?
+       ORDER BY cp.idComprobante DESC
+       LIMIT 1`,
+      [idInscripcion]
+    );
+    conn.release();
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Esta inscripción no tiene un pago registrado' });
+    }
+
+    const cp = rows[0];
+    // Medio de pago legible: "Web - PayU" -> "PayU"
+    const medioPago = String(cp.canalEnvio || '').replace(/^Web\s*-\s*/i, '').trim() || 'En línea';
+    // Referencia e ID de transacción estables (derivados del comprobante)
+    const base = crypto.createHash('sha256').update(`${cp.idComprobante}-${idInscripcion}`).digest('hex');
+    const referencia = `CINE-${idInscripcion}-${base.slice(0, 6).toUpperCase()}`;
+    const transaccionId = `${base.slice(0, 8)}-${base.slice(8, 12)}-${base.slice(12, 16)}-${base.slice(16, 24)}`;
+
+    res.json({
+      success: true,
+      data: {
+        transaccionId,
+        estado: cp.estado === 'Validado' ? 'APROBADO' : String(cp.estado || '').toUpperCase(),
+        descripcion: `Pago de inscripción · ${cp.convocatoria}`,
+        referencia,
+        valor: Number(cp.monto),
+        moneda: 'COP',
+        fecha: cp.fechaCarga,
+        medioPago,
+        correo: cp.correo,
+        postulante: cp.postulante,
+        convocatoria: cp.convocatoria,
+      },
+    });
+  } catch (error) {
+    try { conn.release(); } catch (e) { /* noop */ }
+    console.error('Error al obtener el comprobante de pago:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener el comprobante de pago' });
   }
 });
 
