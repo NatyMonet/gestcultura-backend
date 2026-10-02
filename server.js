@@ -838,6 +838,67 @@ app.post('/api/inscripciones', async (req, res) => {
   }
 });
 
+// POST postulación completa (Formulario inteligente de 5 pasos)
+// Registra en una sola operación (transacción) la inscripción, el formulario
+// diligenciado y la firma electrónica, garantizando la integridad de los datos.
+app.post('/api/postulaciones', async (req, res) => {
+  const { idUsuario, idConvocatoria, motivacion, datos, firmaValor } = req.body;
+
+  if (!idUsuario || !idConvocatoria) {
+    return res.status(400).json({ success: false, message: 'idUsuario e idConvocatoria son requeridos' });
+  }
+
+  const conn = await connection.getConnection();
+  try {
+    // ¿Ya está inscrito en esta convocatoria?
+    const [existentes] = await conn.query(
+      'SELECT idInscripcion FROM inscripcion WHERE idUsuario = ? AND idConvocatoria = ?',
+      [idUsuario, idConvocatoria]
+    );
+    if (existentes.length > 0) {
+      conn.release();
+      return res.status(400).json({ success: false, message: 'Ya estás inscrito en esta convocatoria' });
+    }
+
+    await conn.beginTransaction();
+
+    // 1) Inscripción
+    const [rIns] = await conn.query(
+      'INSERT INTO inscripcion (idUsuario, idConvocatoria, motivacion, fecha) VALUES (?, ?, ?, NOW())',
+      [idUsuario, idConvocatoria, motivacion || '']
+    );
+    const idInscripcion = rIns.insertId;
+
+    // 2) Formulario diligenciado (los datos se guardan como JSON de texto)
+    const [rForm] = await conn.query(
+      'INSERT INTO formulario (datos, fechaDiligenciamiento, idInscripcion) VALUES (?, CURDATE(), ?)',
+      [JSON.stringify(datos || {}), idInscripcion]
+    );
+    const idFormulario = rForm.insertId;
+
+    // 3) Firma electrónica (constancia de texto; la imagen de la firma va en el PDF)
+    await conn.query(
+      'INSERT INTO firma_electronica (valor, fecha, idFormulario) VALUES (?, CURDATE(), ?)',
+      [String(firmaValor || 'Firmado digitalmente').slice(0, 255), idFormulario]
+    );
+
+    await conn.commit();
+    conn.release();
+
+    res.status(201).json({
+      success: true,
+      message: 'Postulación registrada correctamente',
+      idInscripcion,
+      idFormulario,
+    });
+  } catch (error) {
+    try { await conn.rollback(); } catch (e) { /* noop */ }
+    conn.release();
+    console.error('Error al registrar la postulación:', error);
+    res.status(500).json({ success: false, message: 'Error al registrar la postulación' });
+  }
+});
+
 // ============================================================================
 // RUTA - ASISTENTE MONET (IA con Gemini)
 // ============================================================================
