@@ -289,7 +289,7 @@ app.get('/api/usuarios', verificarToken, soloAdmin, async (req, res) => {
   try {
     const conn = await connection.getConnection();
     const [usuarios] = await conn.query(
-      `SELECT u.idUsuario, u.nombre, u.correo, u.telefono, u.cedula, u.estado, u.idRol, r.nombre AS rol
+      `SELECT u.idUsuario, u.nombre, u.correo, u.telefono, u.cedula, u.fechaNacimiento, u.estado, u.idRol, r.nombre AS rol
        FROM usuario u
        JOIN rol r ON u.idRol = r.idRol
        ORDER BY u.idUsuario ASC`
@@ -780,10 +780,10 @@ app.get('/api/inscripciones', async (req, res) => {
   try {
     const conn = await connection.getConnection();
     const [inscripciones] = await conn.query(
-      `SELECT i.idInscripcion, i.fecha, i.estado, i.motivacion, u.nombre AS postulante, u.correo, u.cedula, c.nombre AS convocatoria
+      `SELECT i.idInscripcion, i.fecha, i.estado, i.motivacion, u.nombre AS postulante, u.correo, u.cedula, u.fechaNacimiento, c.nombre AS convocatoria
        FROM inscripcion i
-       JOIN usuario u ON i.idUsuario = u.idUsuario 
-       JOIN convocatoria c ON i.idConvocatoria = c.idConvocatoria 
+       JOIN usuario u ON i.idUsuario = u.idUsuario
+       JOIN convocatoria c ON i.idConvocatoria = c.idConvocatoria
        ORDER BY i.fecha DESC`
     );
     conn.release();
