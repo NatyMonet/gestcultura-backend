@@ -36,7 +36,7 @@ const VALOR_INSCRIPCION = 50000;
 const WOMPI_API = process.env.WOMPI_API || 'https://sandbox.wompi.co/v1';
 
 const app = express();
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 
 // ============================================================================
 // MIDDLEWARE
@@ -44,9 +44,20 @@ const PORT = 5000;
 // Seguridad CORS: solo se permiten peticiones desde el frontend en tu equipo
 // (localhost/127.0.0.1, en cualquier puerto de desarrollo de Vite: 5173, 5174, etc.).
 // Ninguna otra página web de internet puede consumir esta API desde el navegador.
+// Orígenes permitidos en producción (la URL del frontend publicado).
+// Se leen de FRONTEND_URL (puede traer varias separadas por coma).
+const ORIGENES_PERMITIDOS = (process.env.FRONTEND_URL || 'http://localhost:5173')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 const corsOptions = {
   origin: (origin, callback) => {
-    if (!origin || /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) {
+    if (
+      !origin ||
+      /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin) ||
+      ORIGENES_PERMITIDOS.includes(origin)
+    ) {
       callback(null, true);
     } else {
       callback(new Error('Origen no permitido por CORS'));
