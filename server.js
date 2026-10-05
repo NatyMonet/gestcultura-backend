@@ -65,8 +65,9 @@ const corsOptions = {
   },
 };
 app.use(cors(corsOptions));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Límite ampliado para permitir el envío de documentos (PDF) en base64.
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
 // ============================================================================
 // CONFIGURACIÓN DE BASE DE DATOS
@@ -989,6 +990,58 @@ app.post('/api/postulaciones', async (req, res) => {
     conn.release();
     console.error('Error al registrar la postulación:', error);
     res.status(500).json({ success: false, message: 'Error al registrar la postulación' });
+  }
+});
+
+// ============================================================================
+// RUTA - SUBIR DOCUMENTO (los archivos se guardan en el Google Drive de
+// Cinefilia a través de un "puente" en Google Apps Script).
+// ----------------------------------------------------------------------------
+// El navegador envía el archivo en base64; este servidor lo reenvía (servidor
+// a servidor, sin CORS) al Apps Script, que lo guarda en una carpeta del Drive
+// organizada por convocatoria y postulante, y devuelve el enlace del archivo.
+// La URL y la clave del puente viven en el .env (APPS_SCRIPT_URL, UPLOAD_SECRET).
+// ============================================================================
+app.post('/api/subir-documento', async (req, res) => {
+  try {
+    const { dataBase64, filename, mimeType, convocatoria, postulante } = req.body;
+
+    if (!dataBase64 || !filename) {
+      return res.status(400).json({ ok: false, message: 'Falta el archivo o el nombre' });
+    }
+    if (!process.env.APPS_SCRIPT_URL || !process.env.UPLOAD_SECRET) {
+      return res.status(500).json({ ok: false, message: 'El almacenamiento de documentos no está configurado' });
+    }
+
+    // Límite de tamaño: ~10 MB de archivo (el base64 pesa ~33% más).
+    const tamanoAprox = Math.floor((String(dataBase64).length * 3) / 4);
+    if (tamanoAprox > 10 * 1024 * 1024) {
+      return res.status(413).json({ ok: false, message: 'El archivo supera el límite de 10 MB' });
+    }
+
+    const respuesta = await fetch(process.env.APPS_SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        secret: process.env.UPLOAD_SECRET,
+        dataBase64,
+        filename,
+        mimeType: mimeType || 'application/octet-stream',
+        convocatoria: convocatoria || 'Sin convocatoria',
+        postulante: postulante || 'Sin nombre',
+      }),
+      redirect: 'follow',
+    });
+
+    const data = await respuesta.json();
+    if (!data || !data.ok) {
+      return res.status(502).json({ ok: false, message: (data && data.error) || 'No se pudo guardar el documento en Drive' });
+    }
+
+    res.json({ ok: true, url: data.url, id: data.id, nombre: data.nombre });
+  } catch (error) {
+    console.error('Error al subir el documento:', error);
+    res.status(500).json({ ok: false, message: 'Error al subir el documento' });
   }
 });
 
