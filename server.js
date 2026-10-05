@@ -536,6 +536,73 @@ app.post('/api/auth/restablecer', async (req, res) => {
 });
 
 // ============================================================================
+// FORMULARIO DE CONTACTO (envía el mensaje al correo de la organización)
+// ----------------------------------------------------------------------------
+// La persona escribe nombre, correo, asunto y mensaje desde la página pública
+// de Contacto. El sistema envía ese mensaje al correo de Cinefilia usando el
+// mismo "cartero" (nodemailer) de la recuperación de contraseña. El "responder
+// a" (replyTo) queda con el correo de la persona, para que Cinefilia pueda
+// contestarle directamente con un solo clic.
+// ============================================================================
+app.post('/api/contacto', async (req, res) => {
+  try {
+    const { nombre, correo, asunto, mensaje } = req.body;
+
+    // Validaciones básicas (que no lleguen campos vacíos)
+    if (!nombre || !correo || !mensaje) {
+      return res.status(400).json({ success: false, message: 'Por favor completa tu nombre, correo y mensaje.' });
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(correo)) {
+      return res.status(400).json({ success: false, message: 'Por favor escribe un correo electrónico válido.' });
+    }
+
+    // Correo de la organización donde se reciben los mensajes
+    const correoDestino = process.env.EMAIL_CONTACTO || 'info@cinefilia.org.co';
+    const asuntoFinal = asunto && asunto.trim() ? asunto.trim() : 'Nuevo mensaje de contacto';
+
+    const transporter = crearTransporter();
+
+    // MODO DESARROLLO: si aún no hay correo configurado, mostramos el mensaje
+    // en la consola del servidor para poder probar el flujo completo.
+    if (!transporter) {
+      console.log('📨 [CONTACTO - modo desarrollo] De:', nombre, `<${correo}>`, '| Asunto:', asuntoFinal, '| Mensaje:', mensaje);
+      return res.json({ success: true, message: 'Recibimos tu mensaje. ¡Gracias por escribirnos! (modo desarrollo)' });
+    }
+
+    // MODO REAL: enviamos el mensaje al correo de la organización.
+    await transporter.sendMail({
+      from: `"GestCultura - Contacto" <${process.env.EMAIL_USER}>`,
+      to: correoDestino,
+      replyTo: `"${nombre}" <${correo}>`,
+      subject: `[Contacto web] ${asuntoFinal}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 520px; margin: 0 auto; border:1px solid #eee; border-radius:14px; overflow:hidden">
+          <div style="background: linear-gradient(135deg, #7C3AED, #4A148C); color:#fff; padding:24px; text-align:center">
+            <h2 style="margin:0">Gestión Empática</h2>
+            <p style="margin:6px 0 0; opacity:.9">Nuevo mensaje desde el formulario de contacto</p>
+          </div>
+          <div style="padding:24px; color:#333; line-height:1.6">
+            <p><strong>Nombre:</strong> ${nombre}</p>
+            <p><strong>Correo:</strong> ${correo}</p>
+            <p><strong>Asunto:</strong> ${asuntoFinal}</p>
+            <hr style="border:none; border-top:1px solid #eee; margin:16px 0" />
+            <p style="white-space:pre-line">${mensaje}</p>
+            <hr style="border:none; border-top:1px solid #eee; margin:16px 0" />
+            <p style="font-size:13px; color:#777">Puedes responder directamente a este correo para contestarle a la persona.</p>
+          </div>
+        </div>
+      `,
+    });
+
+    return res.json({ success: true, message: '¡Gracias por escribirnos! Recibimos tu mensaje y te responderemos pronto.' });
+  } catch (error) {
+    console.error('Error en formulario de contacto:', error);
+    res.status(500).json({ success: false, message: 'No pudimos enviar tu mensaje. Intenta de nuevo en un momento.' });
+  }
+});
+
+// ============================================================================
 // RUTAS - CONVOCATORIAS
 // ============================================================================
 
