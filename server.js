@@ -864,7 +864,8 @@ app.get('/api/inscripciones', async (req, res) => {
   try {
     const conn = await connection.getConnection();
     const [inscripciones] = await conn.query(
-      `SELECT i.idInscripcion, i.fecha, i.estado, i.motivacion, u.nombre AS postulante, u.correo, u.cedula, u.fechaNacimiento, c.nombre AS convocatoria
+      `SELECT i.idInscripcion, i.fecha, i.estado, i.motivacion, u.nombre AS postulante, u.correo, u.cedula, u.fechaNacimiento, c.nombre AS convocatoria,
+              (SELECT f.datos FROM formulario f WHERE f.idInscripcion = i.idInscripcion ORDER BY f.idFormulario DESC LIMIT 1) AS datos
        FROM inscripcion i
        JOIN usuario u ON i.idUsuario = u.idUsuario
        JOIN convocatoria c ON i.idConvocatoria = c.idConvocatoria
