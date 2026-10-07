@@ -1,3 +1,12 @@
+/**
+ * Nombre del archivo: server.js
+ * Descripción: Servidor principal (Node.js + Express). Define las rutas de la API,
+ *              la conexión a MySQL y la seguridad (JWT, CORS).
+ * Autor: Natalia Mejía Cardona
+ * Fecha de creación: 2026-09-05
+ * Última modificación: 2026-10-07
+ * Licencia: Uso académico — Corporación Cinefilia / SENA.
+ */
 // ============================================================================
 // SERVIDOR EXPRESS.JS - GESTCULTURA
 // Ficha SENA: 3013183 | Estudiante: Natalia Mejía Cardona
