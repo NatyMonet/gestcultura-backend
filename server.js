@@ -420,6 +420,62 @@ function crearTransporter() {
   });
 }
 
+// ----------------------------------------------------------------------------
+// ENVÍO DE CORREOS (Brevo por API HTTP; SMTP solo para desarrollo local)
+// En producción (Render) el SMTP está bloqueado, por eso usamos Brevo por API
+// HTTP (va por HTTPS). Si no hay Brevo configurado, se usa SMTP (nodemailer).
+// Devuelve true si se envió, lanza error si el proveedor configurado falla, y
+// devuelve false si no hay ningún proveedor de correo configurado.
+// ----------------------------------------------------------------------------
+const MAIL_FROM = process.env.MAIL_FROM || 'info@cinefilia.org.co';
+const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || 'GestCultura';
+
+async function enviarCorreo({ para, nombreDestino, asunto, html, replyTo }) {
+  // Opción 1 (producción): Brevo por API HTTP.
+  if (process.env.BREVO_API_KEY) {
+    const cuerpo = {
+      sender: { name: MAIL_FROM_NAME, email: MAIL_FROM },
+      to: [{ email: para, name: nombreDestino || para }],
+      subject: asunto,
+      htmlContent: html,
+    };
+    if (replyTo) cuerpo.replyTo = replyTo;
+
+    const resp = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key': process.env.BREVO_API_KEY,
+        'Content-Type': 'application/json',
+        'accept': 'application/json',
+      },
+      body: JSON.stringify(cuerpo),
+    });
+    if (!resp.ok) {
+      const detalle = await resp.text().catch(() => '');
+      throw new Error(`Brevo respondió ${resp.status}: ${detalle}`);
+    }
+    return true;
+  }
+
+  // Opción 2 (desarrollo local): SMTP con nodemailer (Gmail).
+  const transporter = crearTransporter();
+  if (transporter) {
+    const opciones = {
+      from: `"${MAIL_FROM_NAME}" <${process.env.EMAIL_USER}>`,
+      to: para,
+      subject: asunto,
+      html,
+    };
+    if (replyTo) opciones.replyTo = replyTo;
+    await transporter.sendMail(opciones);
+    return true;
+  }
+
+  // No hay ningún proveedor de correo configurado.
+  return false;
+}
+
+
 // PASO 1 - Solicitar recuperación: POST /api/auth/recuperar
 app.post('/api/auth/recuperar', async (req, res) => {
   try {
@@ -454,21 +510,8 @@ app.post('/api/auth/recuperar', async (req, res) => {
     );
     const enlace = `${FRONTEND_URL}/restablecer?token=${token}`;
 
-    const transporter = crearTransporter();
-
-    // MODO DESARROLLO: si aún no hay correo configurado, mostramos el enlace
-    // en la consola del servidor para poder probar el flujo completo.
-    if (!transporter) {
-      console.log('🔑 [RECUPERACIÓN - modo desarrollo] Enlace para', correo, '->', enlace);
-      return res.json({ success: true, message: mensajeGenerico, enlaceDev: enlace });
-    }
-
-    // MODO REAL: enviamos el correo con el enlace.
-    await transporter.sendMail({
-      from: `"GestCultura" <${process.env.EMAIL_USER}>`,
-      to: correo,
-      subject: 'Recupera tu contraseña - GestCultura',
-      html: `
+    // Contenido del correo de recuperación.
+    const htmlCorreo = `
         <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; border:1px solid #eee; border-radius:14px; overflow:hidden">
           <div style="background: linear-gradient(135deg, #7C3AED, #4A148C); color:#fff; padding:24px; text-align:center">
             <h2 style="margin:0">Gestión Empática</h2>
@@ -483,10 +526,31 @@ app.post('/api/auth/recuperar', async (req, res) => {
             <p style="font-size:13px; color:#777">Este enlace es válido por 30 minutos. Si tú no solicitaste este cambio, puedes ignorar este correo; tu contraseña seguirá igual.</p>
           </div>
         </div>
-      `,
-    });
+      `;
 
-    return res.json({ success: true, message: mensajeGenerico });
+    try {
+      // Enviamos el correo (Brevo en producción, SMTP en desarrollo local).
+      const enviado = await enviarCorreo({
+        para: correo,
+        nombreDestino: usuario.nombre,
+        asunto: 'Recupera tu contraseña - GestCultura',
+        html: htmlCorreo,
+      });
+
+      // Si no hay proveedor de correo configurado, mostramos el enlace en
+      // pantalla para poder continuar (respaldo).
+      if (!enviado) {
+        console.log('🔑 [RECUPERACIÓN - sin correo configurado] Enlace para', correo, '->', enlace);
+        return res.json({ success: true, message: mensajeGenerico, enlaceDev: enlace });
+      }
+
+      return res.json({ success: true, message: mensajeGenerico });
+    } catch (errorCorreo) {
+      // RESPALDO: si el envío falla, igual dejamos continuar mostrando el
+      // enlace en pantalla, para que el flujo de recuperación nunca se rompa.
+      console.error('No se pudo enviar el correo de recuperación:', errorCorreo && errorCorreo.message);
+      return res.json({ success: true, message: mensajeGenerico, enlaceDev: enlace });
+    }
   } catch (error) {
     console.error('Error en recuperar contraseña:', error);
     res.status(500).json({ success: false, message: 'Error al procesar la solicitud' });
