@@ -17,6 +17,8 @@
 //  - Contraseñas de usuarios: guardadas cifradas con bcrypt (hash + salt).
 //  - Credenciales (BD y API): en el archivo .env, fuera del código y del repositorio.
 //  - CORS restringido: solo el frontend de GestCultura puede consumir la API.
+//  - Rate limit (límite de intentos): protege el login, el registro y la
+//    recuperación de contraseña contra ataques de fuerza bruta (respuesta HTTP 429).
 //  - Rutas de administrador protegidas por token JWT + rol: solo un admin puede
 //    crear, editar o eliminar convocatorias (verificarToken + soloAdmin).
 // ============================================================================
@@ -46,6 +48,10 @@ const WOMPI_API = process.env.WOMPI_API || 'https://sandbox.wompi.co/v1';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// Necesario en Render (la app corre detrás de un proxy): permite leer la IP real
+// del visitante para que el rate limit cuente por usuario y no por el proxy.
+app.set('trust proxy', 1);
 
 // ============================================================================
 // MIDDLEWARE
@@ -77,6 +83,55 @@ app.use(cors(corsOptions));
 // Límite ampliado para permitir el envío de documentos (PDF) en base64.
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+
+// ============================================================================
+// RATE LIMIT (límite de intentos) - Seguridad contra ataques de fuerza bruta
+// Limita cuántas peticiones puede hacer una misma IP en una ventana de tiempo.
+// Implementación propia en memoria, sin dependencias externas.
+// ============================================================================
+function crearLimitador({ ventanaMs, maxIntentos, mensaje }) {
+  const accesos = new Map(); // ip -> { conteo, inicio }
+  // Limpieza periódica de IPs vencidas, para no acumular memoria.
+  const limpieza = setInterval(() => {
+    const ahora = Date.now();
+    for (const [ip, data] of accesos) {
+      if (ahora - data.inicio > ventanaMs) accesos.delete(ip);
+    }
+  }, ventanaMs);
+  if (limpieza.unref) limpieza.unref();
+
+  return (req, res, next) => {
+    const ip = req.ip || req.connection?.remoteAddress || 'desconocida';
+    const ahora = Date.now();
+    const data = accesos.get(ip);
+    if (!data || ahora - data.inicio > ventanaMs) {
+      accesos.set(ip, { conteo: 1, inicio: ahora });
+      return next();
+    }
+    data.conteo++;
+    if (data.conteo > maxIntentos) {
+      const segundos = Math.ceil((ventanaMs - (ahora - data.inicio)) / 1000);
+      return res.status(429).json({
+        success: false,
+        message: mensaje || `Demasiados intentos. Intenta de nuevo en ${segundos} segundos.`,
+      });
+    }
+    next();
+  };
+}
+
+// Login: máximo 5 intentos por IP cada 15 minutos (anti fuerza bruta).
+const limiteLogin = crearLimitador({
+  ventanaMs: 15 * 60 * 1000,
+  maxIntentos: 5,
+  mensaje: 'Demasiados intentos de inicio de sesión. Por seguridad, espera 15 minutos e inténtalo de nuevo.',
+});
+// Registro y recuperación de contraseña: máximo 10 por IP cada 15 minutos.
+const limiteSensible = crearLimitador({
+  ventanaMs: 15 * 60 * 1000,
+  maxIntentos: 10,
+  mensaje: 'Has hecho demasiadas solicitudes seguidas. Espera unos minutos e inténtalo de nuevo.',
+});
 
 // ============================================================================
 // CONFIGURACIÓN DE BASE DE DATOS
@@ -149,7 +204,7 @@ function soloAdmin(req, res, next) {
 // ============================================================================
 
 // REGISTRO - POST /api/auth/registro ✅ ACTUALIZADO
-app.post('/api/auth/registro', async (req, res) => {
+app.post('/api/auth/registro', limiteSensible, async (req, res) => {
   try {
         const { nombre, correo, telefono, fechaNacimiento, cedula, contrasena, confirmContrasena } = req.body;
 
@@ -200,7 +255,7 @@ app.post('/api/auth/registro', async (req, res) => {
 });
 
 // LOGIN - POST /api/auth/login
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', limiteLogin, async (req, res) => {
   try {
     const { correo, contrasena } = req.body;
 
@@ -486,7 +541,7 @@ async function enviarCorreo({ para, nombreDestino, asunto, html, replyTo }) {
 
 
 // PASO 1 - Solicitar recuperación: POST /api/auth/recuperar
-app.post('/api/auth/recuperar', async (req, res) => {
+app.post('/api/auth/recuperar', limiteSensible, async (req, res) => {
   try {
     const { correo } = req.body;
     if (!correo) {
