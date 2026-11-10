@@ -1483,6 +1483,65 @@ app.post('/api/monet', async (req, res) => {
 });
 
 // ============================================================================
+// VOZ NATURAL DE MONET (ElevenLabs - Texto a voz)
+// Convierte el texto en audio con una voz natural en español.
+// Devuelve el audio (audio/mpeg) para que el navegador lo reproduzca.
+// ============================================================================
+app.post('/api/voz', async (req, res) => {
+  try {
+    const { texto } = req.body;
+    if (!texto || !texto.trim()) {
+      return res.status(400).json({ success: false, message: 'Falta el texto' });
+    }
+
+    const apiKey = process.env.ELEVENLABS_API_KEY;
+    if (!apiKey) {
+      // Sin clave configurada: el frontend usará la voz del navegador como respaldo.
+      return res.status(503).json({ success: false, message: 'Voz natural no configurada' });
+    }
+
+    // ID de la voz en español. Se puede cambiar desde las variables de entorno.
+    // Por defecto usamos "Sarah" (voz multilingüe), pero conviene elegir una voz
+    // en español desde ElevenLabs y poner su ID en ELEVENLABS_VOICE_ID.
+    const voiceId = process.env.ELEVENLABS_VOICE_ID || 'EXAVITQu4vr4xnSDxMaL';
+
+    // Limitamos el largo del texto para cuidar los créditos de la cuenta.
+    const textoLimpio = String(texto).slice(0, 600);
+
+    const respuesta = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+      {
+        method: 'POST',
+        headers: {
+          'xi-api-key': apiKey,
+          'Content-Type': 'application/json',
+          Accept: 'audio/mpeg',
+        },
+        body: JSON.stringify({
+          text: textoLimpio,
+          model_id: 'eleven_multilingual_v2',
+          voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0.15 },
+        }),
+      }
+    );
+
+    if (!respuesta.ok) {
+      const detalle = await respuesta.text().catch(() => '');
+      console.error('Error de ElevenLabs:', respuesta.status, detalle);
+      return res.status(502).json({ success: false, message: 'No se pudo generar la voz' });
+    }
+
+    const audioBuffer = Buffer.from(await respuesta.arrayBuffer());
+    res.set('Content-Type', 'audio/mpeg');
+    res.set('Cache-Control', 'no-store');
+    res.send(audioBuffer);
+  } catch (error) {
+    console.error('Error en /api/voz:', error);
+    res.status(500).json({ success: false, message: 'Error al generar la voz' });
+  }
+});
+
+// ============================================================================
 // MANEJO DE ERRORES - RUTA 404
 // ============================================================================
 app.use((req, res) => {
